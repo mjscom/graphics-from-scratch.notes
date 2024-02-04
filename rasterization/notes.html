@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lines. Triangles.</title>
+</head>
+
+<body>
+  <main>
+    <canvas id="canvas" width="600" height="600" />
+  </main>
+
+  <script>
+
+    // =============================================================
+    // Imports && constants && templating.
+    // =============================================================
+
+    const viewportSize = 1;
+    const projectionPlaneZ = 1;
+
+    class Point {
+      constructor(x, y, h = 0.5) {
+        this.x = x;
+        this.y = y;
+        this.h = h;
+      }
+    }
+
+    class Vertex {
+      constructor(x, y, z) {
+        this.x = x;
+        this.y = y;
+        this.z = z;
+      }
+    }
+
+    // Vertex for homogeneous coordinates.
+    class Vertex4D {
+      constructor(x, y, z, w) {
+        this.x = x;
+        this.y = y;
+        this.z = z;
+        this.w = w;
+      }
+    }
+
+    /**
+     * v0 - v2 represent the indice of a corresponding Vertex instance
+     * stored in an array. Three Vertex(ices) will compose a triangle, so three
+     * values.
+     **/
+    class Triangle {
+      constructor(v0, v1, v2, colour) {
+        this.v0 = v0;
+        this.v1 = v1;
+        this.v2 = v2;
+        this.colour = colour;
+      }
+    }
+
+    class Model {
+      constructor(vertices, triangles) {
+        this.vertices = vertices;
+        this.triangles = triangles;
+      }
+    }
+
+    class Instance {
+      constructor(model, position, orientation, scale) {
+        this.model = model;
+        this.position = position;
+        this.orientation = orientation || createIdentityMat4D();
+        this.scale = scale || 1.0;
+
+        this.transform = multiplyMatMat4D(
+          createTranslationMat(this.position),
+          multiplyMatMat4D(this.orientation, createScalingMat(this.scale))
+        );
+      }
+    }
+
+    class Camera {
+      constructor(position, orientation) {
+        this.position = position;
+        this.orientation = orientation;
+      }
+    }
+
+    // ======================================================================
+    // Canvas, Viewport, and related drawing functions.
+    // ======================================================================
+
+    let canvas = document.getElementById("canvas");
+    let canvasContext = canvas.getContext("2d");
+    let canvasBuffer = canvasContext.getImageData(
+      0,
+      0,
+      canvas.width,
+      canvas.height
+    );
+    let canvasPitch = canvasBuffer.width * 4;
+
+    /**
+     * Displays the contents of the offscreen buffer into the canvas.
+     **/
+    function updateCanvas() {
+      canvasContext.putImageData(canvasBuffer, 0, 0);
+    }
+
+    /**
+     * Main 'colouring' function.
+     * 
+     * @param   int x  
+     * @param   int y   
+     * @param   arr colour  
+     **/
+    function putPixel(x, y, colour) {
+      // Converting from top-left-0 to center-0 coordinate system.
+      x = canvas.width / 2 + Math.floor(x);
+      y = canvas.height / 2 - Math.floor(y) - 1;
+
+      if (x < 0 || x >= canvas.width || y < 0 || y >= canvas.height) {
+        return;
+      }
+
+      let offset = 4 * x + canvasPitch * y;
+      canvasBuffer.data[offset++] = colour[0];
+      canvasBuffer.data[offset++] = colour[1];
+      canvasBuffer.data[offset++] = colour[2];
+      canvasBuffer.data[offset++] = 255; // alpha = 255 (full opacity)
+    }
+
+    /**
+     * Converts 3D viewport coordinates, to 2D canvas coordiantes. Vz is ignored
+     * as every projected point is on the viewport.
+     * (Vx, Vy, Vz) = (Cx, Cy)
+     *
+     * @param   int x   Any x-coordinate on viewport.
+     * @param   int y   Any y-coordinate on viewport.
+     * @return  arr     2D coordinates for point on C equivalent to V.
+     **/
+    function viewportToCanvas(x, y) {
+      return [
+        (x * canvas.width / viewportSize) | 0,
+        (y * canvas.height / viewportSize) | 0
+      ];
+    }
+
+    // ======================================================================
+    // Linear algebra and helper functions.
+    // ======================================================================
+
+    function addVertices(ver1, ver2) {
+      return new Vertex(
+        ver1.x + ver2.x,
+        ver1.y + ver2.y,
+        ver1.z + ver2.z
+      );
+    }
+
+    // k is any real number.
+    function multiply(k, ver) {
+      return new Vertex(k * ver.x, k * ver.y, k * ver.z);
+    }
+
+    function multiplyMatVec4D(mat, vec) {
+      let result = new Array(4).fill(0);
+      let vector = [vec.x, vec.y, vec.z, vec.w];
+
+      for (let i = 0; i < 4; i++) {
+        for (let j = 0; j < 4; j++) {
+          result[i] += mat[i][j] * vector[j];
+        }
+      }
+      return new Vertex4D(result[0], result[1], result[2], result[3]);
+    }
+
+    function multiplyMatMat4D(mat1, mat2) {
+      let result = Array.from(Array(4), () => new Array(4).fill(0));
+
+      for (let i = 0; i < 4; i++) {
+        for (let j = 0; j < 4; j++) {
+          for (let k = 0; k < 4; k++) {
+            result[i][j] += mat1[i][k] * mat2[k][j];
+          }
+        }
+      }
+      return result;
+    }
+
+    function transposeMat(mat) {
+      let result = Array.from(Array(4), () => new Array(4).fill(0));
+
+      for (let i = 0; i < 4; i++) {
+        for (let j = 0; j < 4; j++) {
+          result[i][j] = mat[j][i];
+        }
+      }
+      return result;
+    }
+
+    // ======================================================================
+    // Matrix creation.
+    // ======================================================================
+
+    /**
+     * Homogenous matrix for any given translation coordinates.
+     * 
+     * @param   Object translation    Accepts coordinates for a Vertex in any
+     *                                space (Camera or Instance). 
+     **/
+    function createTranslationMat(translation) {
+      return [
+        [1, 0, 0, translation.x],
+        [0, 1, 0, translation.y],
+        [0, 0, 1, translation.z],
+        [0, 0, 0, 1]
+      ];
+    }
+
+    function createIdentityMat4D() {
+      return [
+        [1, 0, 0, 0],
+        [0, 1, 0, 0],
+        [0, 0, 1, 0],
+        [0, 0, 0, 1]
+      ];
+    }
+
+    function createScalingMat(scale) {
+      return [
+        [scale, 0, 0, 0],
+        [0, scale, 0, 0],
+        [0, 0, scale, 0],
+        [0, 0, 0, 1]
+      ];
+    }
+
+    /**
+     * Homogenous rotation matrix for rotation around y-axis, at origin.
+     * 
+     * @param   int degrees   Degrees of rotation.   
+     **/
+    function createOYRotationMat(degrees) {
+      let cos = Math.cos(degrees * Math.PI / 180.0);
+      let sin = Math.sin(degrees * Math.PI / 180.0);
+
+      return [
+        [cos, 0, -sin, 0],
+        [0, 1, 0, 0],
+        [sin, 0, cos, 0],
+        [0, 0, 0, 1]
+      ];
+    }
+
+    // ======================================================================
+    // Drawing and projecting lines.
+    // ======================================================================
+
+    /**
+    * Calculates a list of intermediate values between two points. One value
+    * for one value.
+    * 
+    * @param   int   i   Independent (known) variable representing pixels.
+    * @param   float d   Dependent (desired) variable representing values of 
+    *                    generic linear function.
+    * @return  arr       List of intermediate values between two points. 
+    **/
+    function interpolate(i0, d0, i1, d1) {
+      if (i0 === i1) return [d0];
+
+      let values = new Array();
+      let slope = (d1 - d0) / (i1 - i0);
+      let d = d0;
+
+      for (let i = i0; i <= i1; i++) {
+        values.push(d);
+        d += slope;
+      }
+      return values;
+    }
+
+    /**
+     * Draws a line segment from point to point. For each value of x, we 
+     * compute a corresponding y value: y(x+1) = y(x) + a. Then, a colour is 
+     * drawn at the calculated coordinates.
+     * 
+     * @param   Point P0    X, Y coordinates for a point on canvas.
+     * @param   Point P1    X, Y coordinates for a point on canvas.
+     **/
+    function drawLine(P0, P1, colour) {
+      let dx = P1.x - P0.x;
+      let dy = P1.y - P0.y;
+
+      // If rise < run, closer to horizontal. Vertical has infinite slope.
+      if (Math.abs(dx) > Math.abs(dy)) {
+        // Reverse to ensure drawn left to right.
+        if (dx < 0) { let temp = P0; P0 = P1; P1 = temp; }
+
+        let values = interpolate(P0.x, P0.y, P1.x, P1.y);
+        for (let x = P0.x; x <= P1.x; x++) {
+          putPixel(x, values[(x - P0.x) | 0], colour);
+        }
+
+        // Line closer to vertical. Now, cannot draw horizontal.
+      } else {
+        if (dy < 0) { let temp = P0; P0 = P1; P1 = temp; }
+
+        let values = interpolate(P0.y, P0.x, P1.y, P1.x);
+        for (let y = P0.y; y <= P1.y; y++) {
+          putPixel(values[(y - P0.y) | 0], y, colour);
+        }
+      }
+    }
+
+    /**
+     * Given three points, draws a wireframe triangle.
+     * 
+     * @param   arr P0, P1, P2    X, Y coordinates for a point on canvas.  
+     **/
+    function drawWireTriangle(P0, P1, P2, colour) {
+      drawLine(P0, P1, colour);
+      drawLine(P1, P2, colour);
+      drawLine(P0, P2, colour);
+    }
+
+    /**
+     * Project a point from the scene onto the viewport.
+     * 
+     * @param   arr V   X,Y,Z coordinates for vertex in scene.
+     * @return  Vertex  Vertex with projected viewport coordinates.
+     **/
+    function projectVertex(V) {
+      let [cX, cY] = viewportToCanvas(
+        V.x * projectionPlaneZ / V.z,
+        V.y * projectionPlaneZ / V.z
+      );
+      return new Point(cX, cY);
+    }
+
+    // ======================================================================
+    // Rendering scenes.
+    // ======================================================================
+
+    /**
+     * Camera position and orientation is calculated (at most once per 
+     * frame). Then, iterate through all available model instances, rendering
+     * them to the scene always with respect to the camera.
+     * 
+     * @param   Object camera      Object describing orientation matrix and 
+     *                             position vertex.
+     * @param   arr    instances   Array containing Instance objects, with their
+     *                             corresponding model and translations.
+     **/
+    function renderScene(camera, instances) {
+      // Apply camera transform, from world space to camera space.
+      let cameraMatrix = multiplyMatMat4D(
+        transposeMat(camera.orientation),
+        createTranslationMat(multiply(-1, camera.position))
+      );
+
+      for (let instance of instances) {
+        let transform = multiplyMatMat4D(cameraMatrix, instance.transform);
+        renderModel(instance.model, transform);
+      }
+    }
+
+    /**
+     * Applies a transform matrix to each vertex in a given model, then 
+     * projecting the vertex to the viewport. Each triangle is then rendered 
+     * with respect to the new vertices.
+     * 
+     * @param   Model model       Contains list of all vertices for a Model,
+     *                            along with sets of three vertices
+     *                            describing triangles in the scene.
+     * @param   arr   transform   4x4 array representing our transform matrix,
+     *                            to be applied to every vertex.
+     **/
+    function renderModel(model, transform) {
+      let projected = [];
+
+      for (let vertex of model.vertices) {
+        let vertexHomo = new Vertex4D(vertex.x, vertex.y, vertex.z, 1);
+        let vertexMult = multiplyMatVec4D(transform, vertexHomo);
+
+        projected.push(projectVertex(vertexMult));
+      }
+
+      for (let triangle of model.triangles) {
+        renderTriangle(triangle, projected)
+      }
+    }
+
+    /**
+     * Calls drawing function for a given Triangle, with corresponding vertices
+     * found in our (recently projected) projected array.
+     * 
+     * @param   Triangle  T           Three indexes for our vertices in the scene, 
+     *                                and colour.
+     * @param   arr       projected   List of vertices from scene, projected to 
+     *                                the viewport.
+     **/
+    function renderTriangle(T, projected) {
+      drawWireTriangle(
+        projected[T.v0],
+        projected[T.v1],
+        projected[T.v2],
+        T.colour
+      );
+    }
+
+    // ======================================================================
+    // Main, runtime logic.
+    // ======================================================================
+
+    let vertices = [
+      new Vertex(1, 1, 1),
+      new Vertex(-1, 1, 1),
+      new Vertex(-1, -1, 1),
+      new Vertex(1, -1, 1),
+      new Vertex(1, 1, -1),
+      new Vertex(-1, 1, -1),
+      new Vertex(-1, -1, -1),
+      new Vertex(1, -1, -1),
+    ];
+
+    let RED = [255, 0, 0];
+    let GREEN = [0, 255, 0];
+    let BLUE = [0, 0, 255];
+    let YELLOW = [255, 255, 0];
+    let PURPLE = [255, 0, 255];
+    let CYAN = [0, 255, 255];
+
+    let triangles = [
+      new Triangle(0, 1, 2, RED),
+      new Triangle(0, 2, 3, RED),
+      new Triangle(4, 0, 3, GREEN),
+      new Triangle(4, 3, 7, GREEN),
+      new Triangle(5, 4, 7, BLUE),
+      new Triangle(5, 7, 6, BLUE),
+      new Triangle(1, 5, 6, YELLOW),
+      new Triangle(1, 6, 2, YELLOW),
+      new Triangle(4, 5, 1, PURPLE),
+      new Triangle(4, 1, 0, PURPLE),
+      new Triangle(2, 6, 7, CYAN),
+      new Triangle(2, 7, 3, CYAN),
+    ];
+
+    let cube = new Model(vertices, triangles);
+    let instances = [
+      new Instance(cube, new Vertex(-1.5, 0, 7), createIdentityMat4D(), 0.75),
+      new Instance(cube, new Vertex(1.25, 2.5, 7.5), createOYRotationMat(195), 1),
+    ];
+    let camera = new Camera(new Vertex(-3, 1, 2), createOYRotationMat(-30));
+
+    renderScene(camera, instances);
+    updateCanvas();
+
+  </script>
+</body>
+
+</html>

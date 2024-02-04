@@ -1,0 +1,26 @@
+h3 {
+  margin: 20px 10px 10px 10px;
+}
+
+.col {
+  max-width: 600px;
+  width: auto;
+  margin: 10px;
+}
+
+#canvas {
+  max-width: 100%;
+  border: 1px solid black;
+}
+
+.source {
+  max-width: 100%;
+  border: 1px solid black;
+  object-fit: contain;
+}
+
+.container {
+  display: flex;
+  flex-flow: row wrap;
+  justify-content: left;
+}

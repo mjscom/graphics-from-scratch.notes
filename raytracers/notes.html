@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="styles.css" />
+  <title>Tracing.</title>
+</head>
+
+<body>
+  <main>
+    <div class="container">
+      <div class="col">
+        <canvas id="canvas" width="600" height="600" />
+      </div>
+      <div class="col">
+        <img class="source" src="carbon.png" alt="image-of-source-code" />
+      </div>
+    </div>
+  </main>
+
+  <script>
+
+    // =============================================================
+    // Imports && constants && templating.
+    // =============================================================
+
+    const backgroundColour = [0, 0, 0];
+
+    const viewportSize = 1;
+    const projectionPlaneZ = 1;
+
+    const camera = [0, 0, 0];
+    /** const cameraRotation = [
+      [1, 0, -1],
+      [0, 2, 0],
+      [1, 0, 1],
+    ]; */
+
+    class Sphere {
+      constructor(center, radius, colour, specular, reflective) {
+        this.center = center;
+        this.radius = radius;
+        this.colour = colour;
+        this.specular = specular;
+        this.reflective = reflective;
+      }
+    }
+
+    class Light {
+      constructor(type, intensity, position) {
+        this.type = type;
+        this.intensity = intensity;
+        this.position = position;
+      }
+    }
+
+    // ======================================================================
+    // Linear algebra && vector manipulation && helper functions.
+    // ======================================================================
+
+    function dot(vec1, vec2) {
+      return vec1[0] * vec2[0] + vec1[1] * vec2[1] + vec1[2] * vec2[2];
+    }
+
+    // k is any real number.
+    function multiply(k, vec) {
+      return [k * vec[0], k * vec[1], k * vec[2]];
+    }
+
+    // Used only for camera orientation.
+    function multiplyMatrix(vec, matrix) {
+      let arr = new Array(3).fill(0);
+
+      for (let i = 0; i < 3; i++) {
+        for (let j = 0; j < 3; j++) {
+          arr[i] += matrix[i][j] * vec[j];
+        }
+      }
+      return arr;
+    }
+
+    function add(vec1, vec2) {
+      return [vec1[0] + vec2[0], vec1[1] + vec2[1], vec1[2] + vec2[2]];
+    }
+
+    function subtract(vec1, vec2) {
+      return [vec1[0] - vec2[0], vec1[1] - vec2[1], vec1[2] - vec2[2]];
+    }
+
+    function length(vec) {
+      return Math.sqrt(dot(vec, vec));
+    }
+
+    function clamp(colour) {
+      for (let value of colour) {
+        if (value > 255) value = 255;
+        if (value < 0) value = 0;
+      }
+      return colour;
+    }
+
+    // ======================================================================
+    // Canvas, Viewport, and related drawing functions.
+    // ======================================================================
+
+    let canvas = document.getElementById("canvas");
+    let canvasContext = canvas.getContext("2d");
+    let canvasBuffer = canvasContext.getImageData(
+      0,
+      0,
+      canvas.width,
+      canvas.height
+    );
+    let canvasPitch = canvasBuffer.width * 4;
+
+    /**
+     * Displays the contents of the offscreen buffer into the canvas.
+     **/
+    function updateCanvas() {
+      canvasContext.putImageData(canvasBuffer, 0, 0);
+    }
+
+    /**
+     * Main 'colouring' function.
+     * 
+     * @param   int x  
+     * @param   int y   
+     * @param   arr colour  
+     **/
+    function putPixel(x, y, colour) {
+      // Converting from top-left-0 to center-0 coordinate system.
+      x = canvas.width / 2 + x;
+      y = canvas.height / 2 - y - 1;
+
+      if (x < 0 || x >= canvas.width || y < 0 || y >= canvas.height) {
+        return;
+      }
+
+      let offset = 4 * x + canvasPitch * y;
+      canvasBuffer.data[offset++] = colour[0];
+      canvasBuffer.data[offset++] = colour[1];
+      canvasBuffer.data[offset++] = colour[2];
+      canvasBuffer.data[offset++] = 255; // alpha = 255 (full opacity)
+    }
+
+    /**
+     * Converts 2D canvas coordinates, to 3D viewport coordinates.
+     * (Cx, Cy) = (Vx, Vy, Vz)
+     *
+     * @param   int x   Any x-coordinate on canvas.
+     * @param   int y   Any y-coordinate on canvas.
+     * @return  arr     3D coordinates for point in viewport we will
+     *                  trace our ray through.
+     **/
+    function canvasToViewport(x, y) {
+      return [
+        x * (viewportSize / canvas.width),
+        y * (viewportSize / canvas.height),
+        projectionPlaneZ,
+      ];
+    }
+
+    // =============================================================
+    // Raytracer logic.
+    // =============================================================
+
+    /**
+     * Computes the closests intersection(s) of a given ray, for a given
+     * camera / viewport, for all spheres in the scene.
+     *
+     * @param   arr camera      Eye, or viewing position, for the scene.
+     * @param   arr direction   3D coordinates for point in viewport we will
+     *                          trace our ray through.
+     * @param   int tMin        Projection plane / viewport.
+     * @param   int tMax        All objects beyond the projection plane (t > 1).
+     * @return  arr             For all possibly intersections in the scene for
+     *                          a given direction, return closest one and
+     *                          closest sphere it belongs to.
+     **/
+    function closestIntersection(camera, direction, tMin, tMax) {
+      let tClosest = Infinity;
+      let closestSphere = null;
+
+      for (let sphere of spheres) {
+        let [t1, t2] = intersectRaySphere(camera, direction, sphere);
+
+        if (t1 < tClosest && tMin < t1 && t1 < tMax) {
+          tClosest = t1;
+          closestSphere = sphere;
+        }
+
+        if (t2 < tClosest && tMin < t2 && t2 < tMax) {
+          tClosest = t2;
+          closestSphere = sphere;
+        }
+      }
+
+      return [tClosest, closestSphere];
+    }
+
+    /**
+     * Using possible / closest intersection(s) for a given ray with spheres in
+     * the scene, we calculate colour and light-intensity for a point.
+     *
+     * @param   arr camera      Eye, or viewing position, for the scene.
+     * @param   arr direction   3D coordinates for point in viewport we will
+     *                          trace our ray through.
+     * @param   int tMin        Projection plane / viewport.
+     * @param   int tMax        All objects beyond the projection plane (t > 1).
+     * @return  arr             Colour of the sphere at the closest intersection
+     *                          to the camera inside range t.
+     **/
+    function traceRay(camera, direction, tMin, tMax, recursionDepth) {
+      let [tClosest, closestSphere] = closestIntersection(
+        camera,
+        direction,
+        tMin,
+        tMax
+      );
+
+      if (closestSphere == null) {
+        return backgroundColour;
+      }
+
+      let point = add(camera, multiply(tClosest, direction));
+      let normal = subtract(point, closestSphere.center);
+      normal = multiply(1.0 / length(normal), normal);
+
+      let directionRev = multiply(-1, direction);
+      let intensity = computeLighting(
+        point,
+        normal,
+        directionRev,
+        closestSphere.specular
+      );
+      let localColour = multiply(intensity, closestSphere.colour);
+
+      // Is recursive limit hit? Is object reflective?
+      let reflective = closestSphere.reflective;
+      if (recursionDepth <= 0 || reflective <= 0.0) {
+        return localColour;
+      }
+
+      // Compute reflected colour.
+      let ray = reflectRay(directionRev, normal);
+      let reflectedColour = traceRay(
+        point,
+        ray,
+        0.001,
+        Infinity,
+        recursionDepth - 1
+      );
+
+      return add(
+        multiply(1 - reflective, localColour),
+        multiply(reflective, reflectedColour)
+      );
+    }
+
+    /**
+     * For a given ray and sphere, we calculate (quadratic eqn.) three possible
+     * intersection scenarios: none, tangent to sphere (t1 = t2), entering and
+     * exiting the sphere (t1 and t2).
+     *
+     * @param   arr camera      Eye, or viewing position, or point for the scene.
+     * @param   arr direction   3D coordinates for point in viewport we will
+     *                          trace our ray through.
+     * @return  arr             Solutions for 't' for ray / sphere intersection.
+     **/
+    function intersectRaySphere(camera, direction, sphere) {
+      let CO = subtract(camera, sphere.center);
+
+      let a = dot(direction, direction);
+      let b = 2 * dot(CO, direction);
+      let c = dot(CO, CO) - sphere.radius * sphere.radius;
+
+      let discriminant = b * b - 4 * a * c;
+      if (discriminant < 0) {
+        return [Infinity, Infinity];
+      }
+
+      let t1 = (-b + Math.sqrt(discriminant)) / (2 * a);
+      let t2 = (-b - Math.sqrt(discriminant)) / (2 * a);
+      return [t1, t2];
+    }
+
+    /**
+     * Accepts a vector and a normal, and returns a new vector with respect
+     * to the normal.
+     *
+     * @param   arr ray       Vector to be reflected off point on sphere.
+     * @param   arr normal    Surface normal for point on sphere.
+     * @return  arr           Vector for reflected ray.
+     **/
+    function reflectRay(ray, normal) {
+      return subtract(multiply(2.0 * dot(normal, ray), normal), ray);
+    }
+
+    // =============================================================
+    // Lighting logic.
+    // =============================================================
+
+    /**
+     * Calculating the intensity / illumination for a single point on an
+     * object in the scene, considering all light sources in the scene.
+     *
+     * The intensity of the light is represented as the 'width' of a given ray.
+     *
+     * @param   arr point       Point along our spheres surface.
+     * @param   arr normal      Normal vector of any point on sphere lies on a
+     *                          line that goes through center of the sphere.
+     * @param   arr direction   Vector from our point to the camera (reverse) of
+     *                          direction from camera to point that we have.
+     * @param   int specular    Property of surface dictating 'shininess'.
+     * @return  int             Intensity of light at our given point.
+     **/
+    function computeLighting(point, normal, direction, specular) {
+      let tMax;
+      let intensity = 0.0;
+      let lenNormal = length(normal); // Checking our normal length is 1.
+
+      for (let light of lights) {
+        if (light.type === "ambient") {
+          intensity += light.intensity;
+        } else {
+          let lightVec;
+
+          if (light.type === "point") {
+            lightVec = subtract(light.position, point);
+            tMax = 1;
+          } else {
+            lightVec = light.position; // light.type = "directional".
+            tMax = Infinity;
+          }
+
+          // Does point lie in shadow?
+          let [, shadowSphere] = closestIntersection(
+            point,
+            lightVec,
+            0.001,
+            tMax
+          );
+          if (shadowSphere != null) {
+            continue;
+          }
+
+          // Diffuse lighting.
+          let scalerNL = dot(normal, lightVec);
+          if (scalerNL > 0) {
+            intensity +=
+              (light.intensity * scalerNL) / (lenNormal * length(lightVec));
+          }
+
+          // Specular lighting.
+          if (specular != -1) {
+            let reflectionVec = reflectRay(lightVec, normal);
+
+            let scalerRV = dot(reflectionVec, direction);
+            if (scalerRV > 0) {
+              intensity += light.intensity * Math.pow(
+                scalerRV / (length(reflectionVec) * length(direction)),
+                specular
+              );
+            }
+          }
+        }
+      }
+      return intensity;
+    }
+
+    // =============================================================
+    // Main, runtime logic.
+    // =============================================================
+
+    const spheres = [
+      new Sphere([0, -1, 3], 1.1, [255, 0, 0], 500, 0.2),
+      new Sphere([2, 0, 4], 1, [0, 0, 255], 500, 0.3),
+      new Sphere([-2, 0, 4], 1, [0, 255, 0], 10, 0.4),
+      new Sphere([0, -5001, 0], 5000, [255, 255, 0], 1000, 0.6),
+    ];
+
+    const lights = [
+      new Light("ambient", 0.2),
+      new Light("point", 0.6, [2, 1, 0]),
+      new Light("directional", 0.2, [1, 4, 4]),
+    ];
+
+    /**
+     * Iterate through canvas, 0-centered coordinates.
+     **/
+    for (let x = -canvas.width / 2; x <= canvas.width / 2; x++) {
+      for (let y = -canvas.height / 2; y <= canvas.height / 2; y++) {
+        let direction = canvasToViewport(x, y);
+        // direction = multiplyMatrix(direction, cameraRotation);
+
+        let colour = traceRay(camera, direction, 1, Infinity, 3);
+        putPixel(x, y, clamp(colour));
+      }
+    }
+    updateCanvas();
+
+  </script>
+</body>
+
+</html>
